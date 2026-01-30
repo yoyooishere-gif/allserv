@@ -2,8 +2,14 @@ if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
--- ⏳ Tunggu 10 detik setelah game benar-benar load
-task.wait(20)
+-- ⚙️ KONFIGURASI
+local CONFIG = {
+    InitialDelay  = 20,  -- jeda awal setelah game load (detik)
+    HopCooldown   = 20,  -- minimal jarak waktu antar teleport (detik)
+}
+
+-- ⏳ Tunggu setelah game benar-benar load
+task.wait(CONFIG.InitialDelay)
 
 -- 🎯 PLACE ID TETAP
 local PLACE_ID = 121864768012064
@@ -11,21 +17,22 @@ local PLACE_ID = 121864768012064
 local AllIDs = {}
 local foundAnything = ""
 local actualHour = os.date("!*t").hour
-local S_T = game:GetService("TeleportService")
-local S_H = game:GetService("HttpService")
-local PLAYERS = game:GetService("Players")
+
+local TeleportService = game:GetService("TeleportService")
+local HttpService     = game:GetService("HttpService")
+local Players         = game:GetService("Players")
 
 --------------------------------------------------
 -- 📂 LOAD / INIT FILE VISITED SERVER
 --------------------------------------------------
 local function SaveIDs()
     pcall(function()
-        writefile("server-hop-temp.json", S_H:JSONEncode(AllIDs))
+        writefile("server-hop-temp.json", HttpService:JSONEncode(AllIDs))
     end)
 end
 
 local FileOk = pcall(function()
-    AllIDs = S_H:JSONDecode(readfile("server-hop-temp.json"))
+    AllIDs = HttpService:JSONDecode(readfile("server-hop-temp.json"))
 end)
 
 -- Struktur: indeks [1] = hour, [2..n] = JobId server yang sudah dikunjungi
@@ -63,6 +70,7 @@ end
 
 --------------------------------------------------
 -- 🧠 LOGIC AMBIL SERVER BARU
+-- return true kalau berhasil teleport, false kalau tidak ada server valid
 --------------------------------------------------
 local function TPReturner()
     local url
@@ -73,11 +81,11 @@ local function TPReturner()
     end
 
     local success, Site = pcall(function()
-        return S_H:JSONDecode(game:HttpGet(url))
+        return HttpService:JSONDecode(game:HttpGet(url))
     end)
 
     if not success or not Site or not Site.data then
-        return
+        return false
     end
 
     if Site.nextPageCursor and Site.nextPageCursor ~= "null" then
@@ -88,10 +96,10 @@ local function TPReturner()
 
     for _, v in ipairs(Site.data) do
         local serverJobId = tostring(v.id)
-        local maxPlayers = tonumber(v.maxPlayers) or 0
-        local playing    = tonumber(v.playing) or 0
+        local maxPlayers  = tonumber(v.maxPlayers) or 0
+        local playing     = tonumber(v.playing) or 0
 
-        -- ⛔ skip kalau server penuh / hampir penuh / sama dengan server sekarang / sudah pernah dikunjungi
+        -- ⛔ skip kalau server penuh / sama dengan server sekarang / sudah pernah dikunjungi
         if playing < maxPlayers
             and serverJobId ~= currentJob
             and not AlreadyVisited(serverJobId)
@@ -101,29 +109,46 @@ local function TPReturner()
             SaveIDs()
 
             -- 🚀 TELEPORT
-            pcall(function()
-                S_T:TeleportToPlaceInstance(PLACE_ID, serverJobId, PLAYERS.LocalPlayer)
+            local ok, err = pcall(function()
+                TeleportService:TeleportToPlaceInstance(PLACE_ID, serverJobId, Players.LocalPlayer)
             end)
 
-            task.wait(4)
-            return -- stop setelah dapat 1 server valid
+            -- kalau teleport dipanggil, kita anggap sukses (Roblox yang urus lanjutannya)
+            return ok
         end
     end
+
+    -- tidak ada server valid di page ini
+    return false
 end
 
 --------------------------------------------------
--- 🔁 MODULE TELEPORT LOOP
+-- 🔁 MODULE TELEPORT LOOP DENGAN COOLDOWN
 --------------------------------------------------
 local module = {}
+local lastTeleport = 0
 
 function module:Teleport()
-    while task.wait() do
-        pcall(function()
-            TPReturner()
-            if foundAnything ~= "" then
-                TPReturner()
-            end
-        end)
+    while true do
+        task.wait(1) -- jangan spam, cek tiap 1 detik saja
+
+        -- cek cooldown antar teleport
+        if tick() - lastTeleport >= CONFIG.HopCooldown then
+            pcall(function()
+                local hopped = TPReturner()
+
+                -- kalau barusan teleport, update waktu terakhir
+                if hopped then
+                    lastTeleport = tick()
+                -- kalau belum dapat server dan masih ada next page, coba lagi sekali lagi
+                elseif foundAnything ~= "" then
+                    local hopped2 = TPReturner()
+                    if hopped2 then
+                        lastTeleport = tick()
+                    end
+                end
+            end)
+        end
     end
 end
 
