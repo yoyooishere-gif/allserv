@@ -3,7 +3,7 @@ if not game:IsLoaded() then
 end
 
 -- ⏳ Tunggu 10 detik setelah game benar-benar load
-task.wait(10)
+task.wait(15)
 
 -- 🎯 PLACE ID TETAP
 local PLACE_ID = 121864768012064
