@@ -11,74 +11,109 @@ local PLACE_ID = 121864768012064
 local AllIDs = {}
 local foundAnything = ""
 local actualHour = os.date("!*t").hour
-local Deleted = false
 local S_T = game:GetService("TeleportService")
 local S_H = game:GetService("HttpService")
+local PLAYERS = game:GetService("Players")
 
-local File = pcall(function()
-    AllIDs = S_H:JSONDecode(readfile("server-hop-temp.json"))
-end)
-
-if not File then
-    table.insert(AllIDs, actualHour)
+--------------------------------------------------
+-- 📂 LOAD / INIT FILE VISITED SERVER
+--------------------------------------------------
+local function SaveIDs()
     pcall(function()
         writefile("server-hop-temp.json", S_H:JSONEncode(AllIDs))
     end)
 end
 
+local FileOk = pcall(function()
+    AllIDs = S_H:JSONDecode(readfile("server-hop-temp.json"))
+end)
+
+-- Struktur: indeks [1] = hour, [2..n] = JobId server yang sudah dikunjungi
+if not FileOk or type(AllIDs) ~= "table" or #AllIDs == 0 then
+    AllIDs = { actualHour }
+    SaveIDs()
+else
+    -- kalau jam sudah beda, reset list supaya fresh
+    local savedHour = tonumber(AllIDs[1]) or actualHour
+    if savedHour ~= actualHour then
+        AllIDs = { actualHour }
+        SaveIDs()
+    end
+end
+
+--------------------------------------------------
+-- 🔍 FUNGSI CEK SUDAH PERNAH DIKUNJUNGI
+--------------------------------------------------
+local function AlreadyVisited(jobId)
+    jobId = tostring(jobId)
+    for i = 2, #AllIDs do -- mulai dari 2, karena [1] itu hour
+        if tostring(AllIDs[i]) == jobId then
+            return true
+        end
+    end
+    return false
+end
+
+-- tandai server SEKARANG juga sebagai sudah dikunjungi
+local currentJob = game.JobId
+if not AlreadyVisited(currentJob) then
+    table.insert(AllIDs, currentJob)
+    SaveIDs()
+end
+
+--------------------------------------------------
+-- 🧠 LOGIC AMBIL SERVER BARU
+--------------------------------------------------
 local function TPReturner()
-    local Site
+    local url
     if foundAnything == "" then
-        Site = S_H:JSONDecode(game:HttpGet(
-            "https://games.roblox.com/v1/games/" .. PLACE_ID .. "/servers/Public?sortOrder=Asc&limit=100"
-        ))
+        url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100"):format(PLACE_ID)
     else
-        Site = S_H:JSONDecode(game:HttpGet(
-            "https://games.roblox.com/v1/games/" .. PLACE_ID .. "/servers/Public?sortOrder=Asc&limit=100&cursor=" .. foundAnything
-        ))
+        url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&cursor=%s"):format(PLACE_ID, foundAnything)
+    end
+
+    local success, Site = pcall(function()
+        return S_H:JSONDecode(game:HttpGet(url))
+    end)
+
+    if not success or not Site or not Site.data then
+        return
     end
 
     if Site.nextPageCursor and Site.nextPageCursor ~= "null" then
         foundAnything = Site.nextPageCursor
+    else
+        foundAnything = ""
     end
 
-    local num = 0
-    for _, v in pairs(Site.data) do
-        local Possible = true
-        local ID = tostring(v.id)
+    for _, v in ipairs(Site.data) do
+        local serverJobId = tostring(v.id)
+        local maxPlayers = tonumber(v.maxPlayers) or 0
+        local playing    = tonumber(v.playing) or 0
 
-        if tonumber(v.maxPlayers) > tonumber(v.playing) then
-            for _, Existing in pairs(AllIDs) do
-                if num ~= 0 then
-                    if ID == tostring(Existing) then
-                        Possible = false
-                    end
-                else
-                    if tonumber(actualHour) ~= tonumber(Existing) then
-                        pcall(function()
-                            delfile("server-hop-temp.json")
-                            AllIDs = {}
-                            table.insert(AllIDs, actualHour)
-                        end)
-                    end
-                end
-                num += 1
-            end
+        -- ⛔ skip kalau server penuh / hampir penuh / sama dengan server sekarang / sudah pernah dikunjungi
+        if playing < maxPlayers
+            and serverJobId ~= currentJob
+            and not AlreadyVisited(serverJobId)
+        then
+            -- tandai sebagai sudah dikunjungi
+            table.insert(AllIDs, serverJobId)
+            SaveIDs()
 
-            if Possible then
-                table.insert(AllIDs, ID)
-                task.wait()
-                pcall(function()
-                    writefile("server-hop-temp.json", S_H:JSONEncode(AllIDs))
-                    task.wait()
-                    S_T:TeleportToPlaceInstance(PLACE_ID, ID, game.Players.LocalPlayer)
-                end)
-                task.wait(4)
-            end
+            -- 🚀 TELEPORT
+            pcall(function()
+                S_T:TeleportToPlaceInstance(PLACE_ID, serverJobId, PLAYERS.LocalPlayer)
+            end)
+
+            task.wait(4)
+            return -- stop setelah dapat 1 server valid
         end
     end
 end
 
+--------------------------------------------------
+-- 🔁 MODULE TELEPORT LOOP
+--------------------------------------------------
 local module = {}
 
 function module:Teleport()
