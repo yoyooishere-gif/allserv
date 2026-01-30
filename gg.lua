@@ -5,6 +5,9 @@ end
 -- ⏳ Tunggu 10 detik setelah game benar-benar load
 task.wait(10)
 
+-- 🎯 PLACE ID TETAP
+local PLACE_ID = 121864768012064
+
 local AllIDs = {}
 local foundAnything = ""
 local actualHour = os.date("!*t").hour
@@ -23,15 +26,15 @@ if not File then
     end)
 end
 
-local function TPReturner(placeId)
+local function TPReturner()
     local Site
     if foundAnything == "" then
         Site = S_H:JSONDecode(game:HttpGet(
-            'https://games.roblox.com/v1/games/' .. placeId .. '/servers/Public?sortOrder=Asc&limit=100'
+            "https://games.roblox.com/v1/games/" .. PLACE_ID .. "/servers/Public?sortOrder=Asc&limit=100"
         ))
     else
         Site = S_H:JSONDecode(game:HttpGet(
-            'https://games.roblox.com/v1/games/' .. placeId .. '/servers/Public?sortOrder=Asc&limit=100&cursor=' .. foundAnything
+            "https://games.roblox.com/v1/games/" .. PLACE_ID .. "/servers/Public?sortOrder=Asc&limit=100&cursor=" .. foundAnything
         ))
     end
 
@@ -68,7 +71,7 @@ local function TPReturner(placeId)
                 pcall(function()
                     writefile("server-hop-temp.json", S_H:JSONEncode(AllIDs))
                     task.wait()
-                    S_T:TeleportToPlaceInstance(placeId, ID, game.Players.LocalPlayer)
+                    S_T:TeleportToPlaceInstance(PLACE_ID, ID, game.Players.LocalPlayer)
                 end)
                 task.wait(4)
             end
@@ -78,15 +81,18 @@ end
 
 local module = {}
 
-function module:Teleport(placeId)
+function module:Teleport()
     while task.wait() do
         pcall(function()
-            TPReturner(placeId)
+            TPReturner()
             if foundAnything ~= "" then
-                TPReturner(placeId)
+                TPReturner()
             end
         end)
     end
 end
+
+-- 🚀 AUTO START
+module:Teleport()
 
 return module
