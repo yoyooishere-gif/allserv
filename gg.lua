@@ -1,15 +1,13 @@
---==[ SMART SERVER HOPPER – 3–4 PLAYER PRIORITY + BEST FALLBACK ]==--
+--==[ SMART SERVER HOPPER – RANDOM PAGE + MID TRAFFIC ]==--
 
--- Pastikan game sudah load
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
--- Delay setelah auto execute
 task.wait(20)
 
 ----------------------------------------------------------------------
--- SERVICES & INFO
+-- SERVICES
 ----------------------------------------------------------------------
 local Players         = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
@@ -22,13 +20,18 @@ local currentJobId = game.JobId
 ----------------------------------------------------------------------
 -- 🔧 KONFIGURASI
 ----------------------------------------------------------------------
-local TARGET_MIN    = 3      -- target utama minimal player
-local TARGET_MAX    = 4      -- target utama maksimal player
-local MAX_PAGES     = 6      -- jumlah page server yang discan
-local REQUEST_LIMIT = 100    -- jumlah server per page (max 100)
+local TARGET_MIN       = 3       -- target utama minimal player
+local TARGET_MAX       = 4       -- target utama maksimal player
+
+local MAX_SCAN_PAGES   = 6       -- page yang DISCAN setelah lompat
+local REQUEST_LIMIT    = 100     -- jumlah server per page
+
+local RANDOM_START     = true    -- lompat ke page acak dulu
+local RANDOM_PAGE_MIN  = 15      -- minimal page yang dilompati
+local RANDOM_PAGE_MAX  = 60      -- maksimal page yang dilompati
 
 ----------------------------------------------------------------------
--- 🔹 LOAD FRIEND LIST (INFO SAJA)
+-- 🔹 FRIEND LIST (info saja)
 ----------------------------------------------------------------------
 local FriendIds = {}
 
@@ -60,12 +63,12 @@ else
 end
 
 ----------------------------------------------------------------------
--- 🔹 GET SERVER LIST DARI API ROBLOX
+-- 🔹 GET SERVER LIST (Roblox API)
 ----------------------------------------------------------------------
 local cursor = nil
 
 local function GetServers()
-    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=%d")
+    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=%d")
         :format(placeId, REQUEST_LIMIT)
 
     if cursor then
@@ -96,18 +99,40 @@ local function GetServers()
 end
 
 ----------------------------------------------------------------------
+-- 🔹 LOMPAT KE PAGE ACAK (SIMULASI "PAGE 1000")
+----------------------------------------------------------------------
+local function SkipToRandomPage()
+    if not RANDOM_START then return end
+
+    local target = math.random(RANDOM_PAGE_MIN, RANDOM_PAGE_MAX)
+    print(("[ServerHop] Random start page ~%d"):format(target))
+
+    for i = 1, target - 1 do
+        local servers = GetServers()
+        if not servers or not cursor then
+            print("[ServerHop] Stop skip di page", i, "(tidak ada page lanjutan)")
+            break
+        end
+    end
+end
+
+----------------------------------------------------------------------
 -- 🔎 CARI SERVER
 ----------------------------------------------------------------------
-print("[ServerHop] Mencari server 3–4 player...")
+print("[ServerHop] Cari server 3–4 player dari page acak...")
 print("[ServerHop] Current JobId:", currentJobId)
 
-local foundServerId      = nil   -- server yang pas 3–4
+local foundServerId      = nil   -- server pas 3–4
 local foundPlayerCount   = nil
 
-local bestOverallId      = nil   -- server dengan player terbanyak (fallback)
+local bestOverallId      = nil   -- server TERPADAT (fallback)
 local bestOverallPlayers = -1
 
-for page = 1, MAX_PAGES do
+-- 1) Lompat page dulu
+SkipToRandomPage()
+
+-- 2) Scan beberapa page dari posisi sekarang
+for page = 1, MAX_SCAN_PAGES do
     local servers = GetServers()
     if not servers then break end
 
@@ -119,22 +144,23 @@ for page = 1, MAX_PAGES do
         print(("[ServerHop] Cek server %s | %d/%d pemain")
             :format(tostring(id), playing, maxP))
 
-        -- skip kalau data aneh / sama dengan server sekarang / sudah penuh
-        if id and id ~= currentJobId and playing < maxP then
-            -- 🎯 TARGET UTAMA: 3–4 PLAYER
-            if playing >= TARGET_MIN and playing <= TARGET_MAX then
-                foundServerId    = id
-                foundPlayerCount = playing
-                print("[ServerHop] ✅ TARGET FOUND:", id, "|", playing, "player")
-                break
-            end
+        -- skip server aneh / sama / penuh
+        if not id or id == currentJobId or playing >= maxP then
+            continue
+        end
 
-            -- 🌟 FALLBACK: SIMPAN SERVER TERPADAT YANG BELUM FULL
-            -- (prioritas ≥2 player; kalau tidak ada, nanti boleh 1 player)
-            if playing > bestOverallPlayers then
-                bestOverallPlayers = playing
-                bestOverallId      = id
-            end
+        -- 🎯 TARGET: 3–4 PLAYER
+        if playing >= TARGET_MIN and playing <= TARGET_MAX then
+            foundServerId    = id
+            foundPlayerCount = playing
+            print("[ServerHop] ✅ TARGET 3–4 FOUND:", id, "|", playing, "player")
+            break
+        end
+
+        -- 🌟 FALLBACK: server TERPADAT yang belum full
+        if playing > bestOverallPlayers then
+            bestOverallPlayers = playing
+            bestOverallId      = id
         end
     end
 
@@ -143,17 +169,12 @@ for page = 1, MAX_PAGES do
     end
 end
 
--- Kalau tidak ada 3–4 player, pakai server dengan player terbanyak
+-- Kalau tidak ada 3–4 player, pakai server TERPADAT
 if not foundServerId and bestOverallId then
     foundServerId    = bestOverallId
     foundPlayerCount = bestOverallPlayers
-    if bestOverallPlayers >= 2 then
-        print("[ServerHop] ⚠️ Tidak ada 3–4 player, pakai server TERPADAT:",
-              foundServerId, "|", bestOverallPlayers, "player")
-    else
-        print("[ServerHop] ⚠️ Semua server sepi (1 player), pakai salah satu:",
-              foundServerId)
-    end
+    print("[ServerHop] ⚠️ Pakai server TERPADAT:",
+          foundServerId, "|", bestOverallPlayers, "player")
 end
 
 ----------------------------------------------------------------------
@@ -173,8 +194,7 @@ if foundServerId then
         end
     end
 else
-    warn("[ServerHop] ❌ Sama sekali tidak menemukan server yang bisa dipakai.")
-    warn("[ServerHop] Kamu bisa rejoin manual atau pakai Teleport(placeId).")
-    -- Kalau mau auto rejoin:
+    warn("[ServerHop] ❌ Tidak menemukan server yang bisa dipakai.")
+    -- Kalau mau auto rejoin global (kadang dilempar ke server rame):
     -- TeleportService:Teleport(placeId)
 end
