@@ -1,58 +1,73 @@
---==[ MID-TRAFFIC HOPPER – PRIORITAS 7–14 PLAYER + ANTI DUPLICATE ]==--
+--==[ LOOP SERVER HOPPER – REJOIN TERUS + ANTI SERVER SAMA (30 MENIT) ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
-task.wait(20) -- tunggu world load dulu
-
 ----------------------------------------------------------------------
 -- 🔧 KONFIGURASI
 ----------------------------------------------------------------------
 local CONFIG = {
-    MinMidPlayers   = 7,        -- batas bawah mid traffic
-    MaxMidPlayers   = 14,       -- batas atas mid traffic
-    ApiDelay        = 0.6,      -- anti HTTP 429
-    VisitedFile     = "server-hop-visited.json",
-    VisitedTTL      = 1800,     -- 30 menit
+    FirstDelay          = 20,      -- tunggu world load sebelum cek pertama (detik)
+    MinPlayers          = 3,      -- patokan "rame" untuk log & delay
+    HopDelayGood        = 15,     -- jeda hop kalau server rame (>= MinPlayers)
+    HopDelayBad         = 5,      -- jeda hop kalau server sepi  (< MinPlayers)
+
+    VisitedFile         = "server-hop-visited.json",
+    VisitedTTLSeconds   = 1800,   -- 30 menit: jangan betah di server yang sama
+    RejoinIfVisitedDelay = 4,     -- kalau ternyata balik ke JobId lama → rejoin cepat
 }
 
 ----------------------------------------------------------------------
 -- SERVICES
 ----------------------------------------------------------------------
+local Players         = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local HttpService     = game:GetService("HttpService")
 
 local placeId      = game.PlaceId
 local currentJobId = game.JobId
 
-print("[MidHop] Start. JobId sekarang:", currentJobId)
+print("[LoopHop] Start. JobId sekarang:", currentJobId)
 
 ----------------------------------------------------------------------
--- 🧠 VISITED SYSTEM
+-- 🧠 SISTEM VISITED (ANTI NGEKOS DI SERVER SAMA)
 ----------------------------------------------------------------------
 local visited = {}  -- [jobId] = timestamp
 
 local function loadVisited()
-    if not readfile then return end
+    if not readfile then
+        warn("[LoopHop] Executor tidak punya readfile, visited non-aktif.")
+        return
+    end
+
     local ok, content = pcall(function()
         return readfile(CONFIG.VisitedFile)
     end)
-    if not ok or not content or content == "" then return end
+
+    if not ok or not content or content == "" then
+        return
+    end
 
     local okDecode, data = pcall(function()
         return HttpService:JSONDecode(content)
     end)
+
     if okDecode and type(data) == "table" then
         visited = data
+    else
+        warn("[LoopHop] File visited corrupt, reset baru.")
+        visited = {}
     end
 end
 
 local function saveVisited()
     if not writefile then return end
+
     local ok, encoded = pcall(function()
         return HttpService:JSONEncode(visited)
     end)
+
     if ok then
         pcall(function()
             writefile(CONFIG.VisitedFile, encoded)
@@ -62,24 +77,27 @@ end
 
 local function cleanupVisited()
     local now = os.time()
+    local ttl = CONFIG.VisitedTTLSeconds
     local removed = 0
+
     for jobId, ts in pairs(visited) do
-        if type(ts) ~= "number" or now - ts > CONFIG.VisitedTTL then
+        if type(ts) ~= "number" or now - ts > ttl then
             visited[jobId] = nil
             removed += 1
         end
     end
+
     if removed > 0 then
-        print("[MidHop] Hapus", removed, "visited lama.")
+        print("[LoopHop] Hapus", removed, "server lama dari visited.")
         saveVisited()
     end
 end
 
-local function isVisited(jobId)
+local function isRecentlyVisited(jobId)
     if not jobId then return false end
     local ts = visited[jobId]
     if not ts then return false end
-    return (os.time() - ts) <= CONFIG.VisitedTTL
+    return (os.time() - ts) <= CONFIG.VisitedTTLSeconds
 end
 
 local function markVisited(jobId)
@@ -88,102 +106,65 @@ local function markVisited(jobId)
     saveVisited()
 end
 
+----------------------------------------------------------------------
+-- 🔢 FUNGSI JUMLAH PLAYER
+----------------------------------------------------------------------
+local function getPlayerCount()
+    return #Players:GetPlayers()
+end
+
+----------------------------------------------------------------------
+-- 🚀 LOGIKA UTAMA
+----------------------------------------------------------------------
+task.wait(CONFIG.FirstDelay)
+
 loadVisited()
 cleanupVisited()
+
+-- 1) Kalau server ini sudah pernah dikunjungi ≤30 menit → rejoin cepat
+if isRecentlyVisited(currentJobId) then
+    warn("[LoopHop] Server ini sudah ada di visited (<=30 menit). Rejoin cepat...")
+
+    task.wait(CONFIG.RejoinIfVisitedDelay)
+
+    local ok, err = pcall(function()
+        TeleportService:Teleport(placeId)
+    end)
+
+    if not ok then
+        warn("[LoopHop] Teleport(placeId) gagal:", err)
+    else
+        print("[LoopHop] Teleport rejoin (visited) dikirim.")
+    end
+
+    return
+end
+
+-- 2) Server baru: cek jumlah player, lalu jadwalkan hop
+local count = getPlayerCount()
+print(("[LoopHop] Server saat ini: %d pemain"):format(count))
+
+local hopDelay
+if count >= CONFIG.MinPlayers then
+    print(("[LoopHop] ✅ Rame (>= %d). Akan hop lagi setelah %d detik.")
+        :format(CONFIG.MinPlayers, CONFIG.HopDelayGood))
+    hopDelay = CONFIG.HopDelayGood
+else
+    print(("[LoopHop] ⚠️ Sepi (< %d). Akan hop lagi lebih cepat (%d detik).")
+        :format(CONFIG.MinPlayers, CONFIG.HopDelayBad))
+    hopDelay = CONFIG.HopDelayBad
+end
+
+-- tandai server ini sebagai visited sebelum hop
 markVisited(currentJobId)
 
-----------------------------------------------------------------------
--- 🌐 AMBIL 1 PAGE SERVER LIST
-----------------------------------------------------------------------
-local function getServersOnce()
-    task.wait(CONFIG.ApiDelay)
+task.wait(hopDelay)
 
-    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
-        :format(placeId)
-
-    local ok, res = pcall(function()
-        return game:HttpGet(url)
-    end)
-    if not ok then
-        warn("[MidHop] HttpGet gagal:", res)
-        return nil
-    end
-
-    local decoded
-    local okDecode, err = pcall(function()
-        decoded = HttpService:JSONDecode(res)
-    end)
-    if not okDecode then
-        warn("[MidHop] JSON decode gagal:", err)
-        return nil
-    end
-
-    return decoded.data
-end
-
-----------------------------------------------------------------------
--- 🔎 PILIH SERVER: PRIORITAS 7–14 PLAYER
-----------------------------------------------------------------------
-local servers = getServersOnce()
-if not servers then
-    warn("[MidHop] Tidak bisa ambil server list (API error).")
-    return
-end
-
-local targetMidId, targetMidPlayers
-local backupId,    backupPlayers
-
-for _, server in ipairs(servers) do
-    local id      = server.id
-    local playing = server.playing or 0
-    local maxP    = server.maxPlayers or 0
-
-    print(("[MidHop] Cek server %s | %d/%d pemain")
-        :format(tostring(id), playing, maxP))
-
-    if not id or id == currentJobId or playing >= maxP or isVisited(id) then
-        continue
-    end
-
-    -- 🎯 PRIORITAS: 7–14 PLAYER
-    if playing >= CONFIG.MinMidPlayers and playing <= CONFIG.MaxMidPlayers then
-        targetMidId      = id
-        targetMidPlayers = playing
-        break -- sudah ketemu mid, nggak perlu lanjut
-    end
-
-    -- 🤏 BACKUP: server apapun yang tidak penuh & belum visited
-    if not backupId then
-        backupId      = id
-        backupPlayers = playing
-    end
-end
-
-----------------------------------------------------------------------
--- 🚀 TELEPORT
-----------------------------------------------------------------------
-local finalId, finalPlayers
-
-if targetMidId then
-    finalId      = targetMidId
-    finalPlayers = targetMidPlayers
-    print("[MidHop] ✅ Dapat mid traffic:", finalId, "|", finalPlayers, "pemain")
-elseif backupId then
-    finalId      = backupId
-    finalPlayers = backupPlayers
-    print("[MidHop] ⚠️ Tidak ada 7–14 player di page ini, pakai server lain:",
-          finalId, "|", finalPlayers, "pemain")
-else
-    warn("[MidHop] ❌ Tidak ada server lain yang bisa dimasuki (semua penuh / visited).")
-    return
-end
-
-markVisited(finalId)
-
+print("[LoopHop] 🔁 Teleport ke server lain...")
 local ok, err = pcall(function()
-    TeleportService:TeleportToPlaceInstance(placeId, finalId)
+    TeleportService:Teleport(placeId)
 end)
 
 if not ok then
-    warn("[MidHop] Teleport gagal:", err)
+    warn("[LoopHop] Teleport(placeId) gagal:", err)
 end
