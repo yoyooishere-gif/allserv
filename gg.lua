@@ -1,21 +1,20 @@
---==[ MID-TRAFFIC HOPPER – PRIORITAS 7–14 PLAYER + ANTI DUPLICATE + NO 1/20 ]==--
+--==[ MID-TRAFFIC HOPPER – PRIORITAS 7–14 PLAYER + ANTI DUPLICATE ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
-task.wait(10) -- tunggu world load dulu
+task.wait(8) -- tunggu world load dulu
 
 ----------------------------------------------------------------------
 -- 🔧 KONFIGURASI
 ----------------------------------------------------------------------
 local CONFIG = {
-    MinMidPlayers    = 7,        -- batas bawah mid traffic
-    MaxMidPlayers    = 14,       -- batas atas mid traffic
-    MinBackupPlayers = 3,        -- backup hanya server dengan >= 3 player
-    ApiDelay         = 0.6,      -- anti HTTP 429
-    VisitedFile      = "server-hop-visited.json",
-    VisitedTTL       = 1800,     -- 30 menit
+    MinMidPlayers   = 7,        -- batas bawah mid traffic
+    MaxMidPlayers   = 14,       -- batas atas mid traffic
+    ApiDelay        = 0.6,      -- anti HTTP 429
+    VisitedFile     = "server-hop-visited.json",
+    VisitedTTL      = 1800,     -- 30 menit
 }
 
 ----------------------------------------------------------------------
@@ -123,18 +122,11 @@ local function getServersOnce()
 end
 
 ----------------------------------------------------------------------
--- 🔎 PILIH SERVER: PRIORITAS 7–14 PLAYER, BACKUP >= 3 PLAYER
+-- 🔎 PILIH SERVER: PRIORITAS 7–14 PLAYER
 ----------------------------------------------------------------------
 local servers = getServersOnce()
 if not servers then
-    warn("[MidHop] Tidak bisa ambil server list (API error). Pakai rejoin biasa.")
-    -- tetap hop: rejoin random kalau API error
-    local ok, err = pcall(function()
-        TeleportService:Teleport(placeId)
-    end)
-    if not ok then
-        warn("[MidHop] Teleport(placeId) gagal:", err)
-    end
+    warn("[MidHop] Tidak bisa ambil server list (API error).")
     return
 end
 
@@ -149,11 +141,6 @@ for _, server in ipairs(servers) do
     print(("[MidHop] Cek server %s | %d/%d pemain")
         :format(tostring(id), playing, maxP))
 
-    -- skip:
-    -- - id kosong
-    -- - server yang sama
-    -- - server penuh
-    -- - server yang baru saja dikunjungi (<= 30 menit)
     if not id or id == currentJobId or playing >= maxP or isVisited(id) then
         continue
     end
@@ -165,18 +152,15 @@ for _, server in ipairs(servers) do
         break -- sudah ketemu mid, nggak perlu lanjut
     end
 
-    -- 🤏 BACKUP: HANYA server dengan >= MinBackupPlayers (tidak akan 1/20)
-    if playing >= CONFIG.MinBackupPlayers then
-        -- ambil backup pertama yang memenuhi syarat
-        if not backupId then
-            backupId      = id
-            backupPlayers = playing
-        end
+    -- 🤏 BACKUP: server apapun yang tidak penuh & belum visited
+    if not backupId then
+        backupId      = id
+        backupPlayers = playing
     end
 end
 
 ----------------------------------------------------------------------
--- 🚀 TELEPORT (SELALU HOP)
+-- 🚀 TELEPORT
 ----------------------------------------------------------------------
 local finalId, finalPlayers
 
@@ -187,12 +171,13 @@ if targetMidId then
 elseif backupId then
     finalId      = backupId
     finalPlayers = backupPlayers
-    print("[MidHop] ⚠️ Tidak ada 7–14 player di page ini, pakai server backup:",
-          finalId, "|", finalPlayers, "pemain (>= " .. CONFIG.MinBackupPlayers .. ")")
+    print("[MidHop] ⚠️ Tidak ada 7–14 player di page ini, pakai server lain:",
+          finalId, "|", finalPlayers, "pemain")
 else
-    -- masih tetap hop, tapi lewat rejoin random
-    warn("[MidHop] ❌ Tidak ada server 7–14 atau >= " .. CONFIG.MinBackupPlayers ..
-         " player di page ini. Rejoin random via Teleport(placeId).")
+    -- 🔁 PERUBAHAN KECIL DI SINI:
+    -- sebelumnya: return (stay di server sekarang)
+    -- sekarang: tetap hop pakai rejoin random
+    warn("[MidHop] ❌ Tidak ada server lain yang bisa dimasuki (semua penuh / visited). Rejoin random.")
 
     local ok, err = pcall(function()
         TeleportService:Teleport(placeId)
@@ -203,7 +188,6 @@ else
     return
 end
 
--- tandai target sebagai visited dan teleport
 markVisited(finalId)
 
 local ok, err = pcall(function()
@@ -211,5 +195,5 @@ local ok, err = pcall(function()
 end)
 
 if not ok then
-    warn("[MidHop] TeleportToPlaceInstance gagal:", err)
+    warn("[MidHop] Teleport gagal:", err)
 end
