@@ -4,7 +4,7 @@ if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
-task.wait(18) -- tunggu world load dulu
+task.wait(10) -- tunggu world load dulu
 
 ----------------------------------------------------------------------
 -- 🔧 KONFIGURASI
