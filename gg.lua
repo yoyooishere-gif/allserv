@@ -27,8 +27,8 @@ local MAX_SCAN_PAGES   = 6       -- page yang DISCAN setelah lompat
 local REQUEST_LIMIT    = 100     -- jumlah server per page
 
 local RANDOM_START     = true    -- lompat ke page acak dulu
-local RANDOM_PAGE_MIN  = 15      -- minimal page yang dilompati
-local RANDOM_PAGE_MAX  = 60      -- maksimal page yang dilompati
+local RANDOM_PAGE_MIN  = 5      -- minimal page yang dilompati
+local RANDOM_PAGE_MAX  = 30     -- maksimal page yang dilompati
 
 ----------------------------------------------------------------------
 -- 🔹 FRIEND LIST (info saja)
