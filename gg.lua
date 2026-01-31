@@ -1,37 +1,135 @@
---==[ SMART SERVER HOPPER – RANDOM PAGE + MID TRAFFIC ]==--
+--==[ HYBRID SERVER HOPPER – API HOP + REJOIN + ANTI DUPLICATE ]==--
 
+-- Pastikan game sudah load
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
-task.wait(20)
+----------------------------------------------------------------------
+-- 🔧 KONFIGURASI
+----------------------------------------------------------------------
+local CONFIG = {
+    DelayBeforeStart   = 10,    -- jeda sebelum mulai (detik)
+
+    -- Target player di server tujuan (mid traffic)
+    MinPlayers         = 3,     -- minimal pemain
+    MaxPlayers         = 15,    -- maksimal pemain
+
+    -- Pengaturan scan server list
+    MaxPagesToScan     = 6,     -- berapa page sesudah skip yang discan
+    RandomSkipMin      = 0,     -- minimal page yang diskip di awal
+    RandomSkipMax      = 8,     -- maksimal page yang diskip di awal
+    ApiDelay           = 0.6,   -- delay antar HttpGet (anti HTTP 429)
+
+    -- File penyimpanan server yang pernah dikunjungi
+    VisitedFile        = "server-hop-visited.json",
+    VisitedTTLSeconds  = 1800,  -- 1800 detik = 30 menit tidak balik server yang sama
+
+    -- Fallback kalau API gagal / tidak nemu server
+    UseRejoinFallback  = true,  -- true = pakai Teleport(placeId) kalau API gagal
+}
+
+task.wait(CONFIG.DelayBeforeStart)
 
 ----------------------------------------------------------------------
--- SERVICES
+-- SERVICES & INFO
 ----------------------------------------------------------------------
 local Players         = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local HttpService     = game:GetService("HttpService")
 
-local LocalPlayer  = Players.LocalPlayer
-local placeId      = game.PlaceId
-local currentJobId = game.JobId
+local LocalPlayer     = Players.LocalPlayer
+local placeId         = game.PlaceId
+local currentJobId    = game.JobId
+
+print("[HybridHop] Start. PlaceId:", placeId, "| JobId:", currentJobId)
 
 ----------------------------------------------------------------------
--- 🔧 KONFIGURASI
+-- 🧠 SISTEM VISITED SERVER (ANTI BALIK 30 MENIT)
 ----------------------------------------------------------------------
-local TARGET_MIN       = 3       -- target utama minimal player
-local TARGET_MAX       = 4       -- target utama maksimal player
+local visited = {}  -- [jobId] = lastTime
 
-local MAX_SCAN_PAGES   = 6       -- page yang DISCAN setelah lompat
-local REQUEST_LIMIT    = 100     -- jumlah server per page
+local function loadVisited()
+    if not readfile then
+        warn("[HybridHop] Executor tidak punya readfile, visited tidak bisa dipakai.")
+        return
+    end
 
-local RANDOM_START     = true    -- lompat ke page acak dulu
-local RANDOM_PAGE_MIN  = 5      -- minimal page yang dilompati
-local RANDOM_PAGE_MAX  = 30     -- maksimal page yang dilompati
+    local ok, content = pcall(function()
+        return readfile(CONFIG.VisitedFile)
+    end)
+
+    if not ok or not content or content == "" then
+        return
+    end
+
+    local okDecode, data = pcall(function()
+        return HttpService:JSONDecode(content)
+    end)
+
+    if okDecode and type(data) == "table" then
+        visited = data
+    else
+        warn("[HybridHop] JSON visited corrupt, reset baru.")
+        visited = {}
+    end
+end
+
+local function saveVisited()
+    if not writefile then
+        return
+    end
+
+    local ok, encoded = pcall(function()
+        return HttpService:JSONEncode(visited)
+    end)
+
+    if ok then
+        pcall(function()
+            writefile(CONFIG.VisitedFile, encoded)
+        end)
+    end
+end
+
+local function cleanupVisited()
+    local now = os.time()
+    local ttl = CONFIG.VisitedTTLSeconds
+
+    local removed = 0
+    for jobId, ts in pairs(visited) do
+        if type(ts) ~= "number" or now - ts > ttl then
+            visited[jobId] = nil
+            removed += 1
+        end
+    end
+    if removed > 0 then
+        print("[HybridHop] Bersihkan", removed, "server lama dari visited.")
+        saveVisited()
+    end
+end
+
+local function markVisited(jobId)
+    if not jobId then return end
+    visited[jobId] = os.time()
+    saveVisited()
+end
+
+local function isRecentlyVisited(jobId)
+    if not jobId then return false end
+    local ts = visited[jobId]
+    if not ts then return false end
+    local now = os.time()
+    return (now - ts) <= CONFIG.VisitedTTLSeconds
+end
+
+-- Load dan bersihkan visited, lalu tandai server sekarang
+loadVisited()
+cleanupVisited()
+markVisited(currentJobId)
+print("[HybridHop] Tandai server sekarang sebagai visited.")
 
 ----------------------------------------------------------------------
--- 🔹 FRIEND LIST (info saja)
+-- 🔹 OPTIONAL: CEK TEMAN DI SERVER (INFO SAJA)
 ----------------------------------------------------------------------
 local FriendIds = {}
 
@@ -46,7 +144,7 @@ pcall(function()
     end)
 end)
 
-local function HasFriendHere()
+local function hasFriendHere()
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer and FriendIds[plr.UserId] then
             return true, plr.Name
@@ -55,21 +153,24 @@ local function HasFriendHere()
     return false
 end
 
-local hasFriend, friendName = HasFriendHere()
-if hasFriend then
-    warn("[ServerHop] Ada teman di server:", friendName)
+local friendInServer, friendName = hasFriendHere()
+if friendInServer then
+    warn("[HybridHop] Ada teman di server:", friendName, "(hanya info, tetap akan hop).")
 else
-    print("[ServerHop] Tidak ada teman di server ini")
+    print("[HybridHop] Tidak ada teman di server ini.")
 end
 
 ----------------------------------------------------------------------
--- 🔹 GET SERVER LIST (Roblox API)
+-- 🌐 FUNGSI GET SERVER LIST VIA API ROBLOX
 ----------------------------------------------------------------------
 local cursor = nil
+local lastApiError = nil
 
-local function GetServers()
-    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=%d")
-        :format(placeId, REQUEST_LIMIT)
+local function getServers()
+    task.wait(CONFIG.ApiDelay)  -- anti 429
+
+    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=%d")
+        :format(placeId, 100)
 
     if cursor then
         url = url .. "&cursor=" .. cursor
@@ -80,7 +181,8 @@ local function GetServers()
     end)
 
     if not ok then
-        warn("[ServerHop] Gagal HttpGet:", res)
+        lastApiError = tostring(res)
+        warn("[HybridHop] Gagal HttpGet:", lastApiError)
         return nil
     end
 
@@ -90,7 +192,8 @@ local function GetServers()
     end)
 
     if not okDecode then
-        warn("[ServerHop] Gagal decode JSON:", err)
+        lastApiError = tostring(err)
+        warn("[HybridHop] Gagal decode JSON:", lastApiError)
         return nil
     end
 
@@ -99,102 +202,139 @@ local function GetServers()
 end
 
 ----------------------------------------------------------------------
--- 🔹 LOMPAT KE PAGE ACAK (SIMULASI "PAGE 1000")
+-- 🔎 COBA CARI SERVER VIA API
 ----------------------------------------------------------------------
-local function SkipToRandomPage()
-    if not RANDOM_START then return end
+local function tryApiHop()
+    print("[HybridHop] Mulai cari server via API...")
+    cursor = nil
+    lastApiError = nil
 
-    local target = math.random(RANDOM_PAGE_MIN, RANDOM_PAGE_MAX)
-    print(("[ServerHop] Random start page ~%d"):format(target))
+    -- Skip beberapa page secara acak
+    local skipCount = 0
+    if CONFIG.RandomSkipMax > 0 then
+        skipCount = math.random(CONFIG.RandomSkipMin, CONFIG.RandomSkipMax)
+    end
 
-    for i = 1, target - 1 do
-        local servers = GetServers()
-        if not servers or not cursor then
-            print("[ServerHop] Stop skip di page", i, "(tidak ada page lanjutan)")
-            break
+    if skipCount > 0 then
+        print(("[HybridHop] Skip ~%d page dulu sebelum scan."):format(skipCount))
+        for i = 1, skipCount do
+            local servers = getServers()
+            if not servers or not cursor then
+                print("[HybridHop] Skip berhenti di page", i, "(tidak ada page lanjutan / error).")
+                break
+            end
         end
     end
-end
 
-----------------------------------------------------------------------
--- 🔎 CARI SERVER
-----------------------------------------------------------------------
-print("[ServerHop] Cari server 3–4 player dari page acak...")
-print("[ServerHop] Current JobId:", currentJobId)
+    local bestServerId    = nil
+    local bestPlayerCount = -1
 
-local foundServerId      = nil   -- server pas 3–4
-local foundPlayerCount   = nil
-
-local bestOverallId      = nil   -- server TERPADAT (fallback)
-local bestOverallPlayers = -1
-
--- 1) Lompat page dulu
-SkipToRandomPage()
-
--- 2) Scan beberapa page dari posisi sekarang
-for page = 1, MAX_SCAN_PAGES do
-    local servers = GetServers()
-    if not servers then break end
-
-    for _, server in ipairs(servers) do
-        local id      = server.id
-        local playing = server.playing or 0
-        local maxP    = server.maxPlayers or 0
-
-        print(("[ServerHop] Cek server %s | %d/%d pemain")
-            :format(tostring(id), playing, maxP))
-
-        -- skip server aneh / sama / penuh
-        if not id or id == currentJobId or playing >= maxP then
-            continue
-        end
-
-        -- 🎯 TARGET: 3–4 PLAYER
-        if playing >= TARGET_MIN and playing <= TARGET_MAX then
-            foundServerId    = id
-            foundPlayerCount = playing
-            print("[ServerHop] ✅ TARGET 3–4 FOUND:", id, "|", playing, "player")
+    for page = 1, CONFIG.MaxPagesToScan do
+        local servers = getServers()
+        if not servers then
+            -- kalau error (429/dll), keluar
             break
         end
 
-        -- 🌟 FALLBACK: server TERPADAT yang belum full
-        if playing > bestOverallPlayers then
-            bestOverallPlayers = playing
-            bestOverallId      = id
+        if #servers == 0 then
+            print("[HybridHop] Page", page, "kosong.")
+            if not cursor then break end
+        end
+
+        for _, server in ipairs(servers) do
+            local id      = server.id
+            local playing = server.playing or 0
+            local maxP    = server.maxPlayers or 0
+
+            print(("[HybridHop] Cek server %s | %d/%d pemain")
+                :format(tostring(id), playing, maxP))
+
+            -- skip kalau:
+            -- - id nil
+            -- - server ini sama dengan server sekarang
+            -- - server penuh
+            -- - server ini baru saja dikunjungi (anti balik 30 menit)
+            if not id
+                or id == currentJobId
+                or playing >= maxP
+                or isRecentlyVisited(id)
+            then
+                continue
+            end
+
+            -- hanya ambil server dalam range player yang diinginkan
+            local enoughPlayers = playing >= CONFIG.MinPlayers
+            local notTooMany    = playing <= CONFIG.MaxPlayers
+
+            if enoughPlayers and notTooMany then
+                -- pilih server dengan player TERBANYAK dalam range
+                if playing > bestPlayerCount then
+                    bestPlayerCount = playing
+                    bestServerId    = id
+                end
+            end
+        end
+
+        if bestServerId or not cursor then
+            break
         end
     end
 
-    if foundServerId or not cursor then
-        break
+    if not bestServerId then
+        if lastApiError then
+            warn("[HybridHop] API tidak bisa dipakai. Error terakhir:", lastApiError)
+        else
+            warn("[HybridHop] Sama sekali tidak menemukan server yang cocok di range",
+                 CONFIG.MinPlayers, "-", CONFIG.MaxPlayers, "pemain.")
+        end
+        return false
     end
-end
 
--- Kalau tidak ada 3–4 player, pakai server TERPADAT
-if not foundServerId and bestOverallId then
-    foundServerId    = bestOverallId
-    foundPlayerCount = bestOverallPlayers
-    print("[ServerHop] ⚠️ Pakai server TERPADAT:",
-          foundServerId, "|", bestOverallPlayers, "player")
-end
+    print(("[HybridHop] ✅ Server terpilih: %s | %d pemain (tidak visited, tidak penuh)")
+        :format(bestServerId, bestPlayerCount))
 
-----------------------------------------------------------------------
--- 🚀 TELEPORT
-----------------------------------------------------------------------
-if foundServerId then
-    print("[ServerHop] Teleporting ke:", foundServerId, "| players:", foundPlayerCount or "?")
+    -- tandai server target sebagai visited sebelum teleport
+    markVisited(bestServerId)
 
-    local ok, err = pcall(function()
-        TeleportService:TeleportToPlaceInstance(placeId, foundServerId)
+    local ok, tpErr = pcall(function()
+        TeleportService:TeleportToPlaceInstance(placeId, bestServerId)
     end)
 
     if not ok then
-        warn("[ServerHop] Teleport gagal:", err)
-        if tostring(err):find("773") then
-            warn("[ServerHop] Error 773 (Restricted Place)")
-        end
+        warn("[HybridHop] TeleportToPlaceInstance gagal:", tpErr)
+        return false
     end
-else
-    warn("[ServerHop] ❌ Tidak menemukan server yang bisa dipakai.")
-    -- Kalau mau auto rejoin global (kadang dilempar ke server rame):
-    -- TeleportService:Teleport(placeId)
+
+    print("[HybridHop] Teleport via API hop dikirim.")
+    return true
+end
+
+----------------------------------------------------------------------
+-- 🔁 FALLBACK: REJOIN RANDOM SERVER (TANPA API)
+----------------------------------------------------------------------
+local function fallbackRejoin()
+    if not CONFIG.UseRejoinFallback then
+        warn("[HybridHop] Fallback rejoin dimatikan di config.")
+        return
+    end
+
+    warn("[HybridHop] Fallback aktif: rejoin random server via Teleport(placeId).")
+
+    local ok, err = pcall(function()
+        TeleportService:Teleport(placeId)
+    end)
+
+    if not ok then
+        warn("[HybridHop] Teleport(placeId) gagal:", err)
+    else
+        print("[HybridHop] Teleport rejoin dikirim. Roblox akan pilih server lain (sering beda JobId).")
+    end
+end
+
+----------------------------------------------------------------------
+-- 🚀 EKSEKUSI UTAMA
+----------------------------------------------------------------------
+local success = tryApiHop()
+if not success then
+    fallbackRejoin()
 end
