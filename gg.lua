@@ -1,4 +1,4 @@
---==[ SMART SERVER HOPPER – 3–4 PLAYER PRIORITY ]==--
+--==[ SMART SERVER HOPPER – 3–4 PLAYER PRIORITY + BEST FALLBACK ]==--
 
 -- Pastikan game sudah load
 if not game:IsLoaded() then
@@ -22,10 +22,10 @@ local currentJobId = game.JobId
 ----------------------------------------------------------------------
 -- 🔧 KONFIGURASI
 ----------------------------------------------------------------------
-local TARGET_MIN      = 3      -- target utama minimal player
-local TARGET_MAX      = 4      -- target utama maksimal player
-local MAX_PAGES       = 6      -- jumlah page server yang discan
-local REQUEST_LIMIT   = 100    -- jangan diubah
+local TARGET_MIN    = 3      -- target utama minimal player
+local TARGET_MAX    = 4      -- target utama maksimal player
+local MAX_PAGES     = 6      -- jumlah page server yang discan
+local REQUEST_LIMIT = 100    -- jumlah server per page (max 100)
 
 ----------------------------------------------------------------------
 -- 🔹 LOAD FRIEND LIST (INFO SAJA)
@@ -60,7 +60,7 @@ else
 end
 
 ----------------------------------------------------------------------
--- 🔹 GET SERVER LIST
+-- 🔹 GET SERVER LIST DARI API ROBLOX
 ----------------------------------------------------------------------
 local cursor = nil
 
@@ -69,7 +69,7 @@ local function GetServers()
         :format(placeId, REQUEST_LIMIT)
 
     if cursor then
-        url ..= "&cursor=" .. cursor
+        url = url .. "&cursor=" .. cursor
     end
 
     local ok, res = pcall(function()
@@ -96,16 +96,16 @@ local function GetServers()
 end
 
 ----------------------------------------------------------------------
--- 🔎 SEARCH SERVER
+-- 🔎 CARI SERVER
 ----------------------------------------------------------------------
 print("[ServerHop] Mencari server 3–4 player...")
 print("[ServerHop] Current JobId:", currentJobId)
 
-local foundServerId    = nil
-local foundPlayerCount = nil
+local foundServerId      = nil   -- server yang pas 3–4
+local foundPlayerCount   = nil
 
-local fallbackId       = nil
-local fallbackPlayers  = -1
+local bestOverallId      = nil   -- server dengan player terbanyak (fallback)
+local bestOverallPlayers = -1
 
 for page = 1, MAX_PAGES do
     local servers = GetServers()
@@ -119,41 +119,48 @@ for page = 1, MAX_PAGES do
         print(("[ServerHop] Cek server %s | %d/%d pemain")
             :format(tostring(id), playing, maxP))
 
-        if not id or id == currentJobId or playing >= maxP then
-            continue
-        end
+        -- skip kalau data aneh / sama dengan server sekarang / sudah penuh
+        if id and id ~= currentJobId and playing < maxP then
+            -- 🎯 TARGET UTAMA: 3–4 PLAYER
+            if playing >= TARGET_MIN and playing <= TARGET_MAX then
+                foundServerId    = id
+                foundPlayerCount = playing
+                print("[ServerHop] ✅ TARGET FOUND:", id, "|", playing, "player")
+                break
+            end
 
-        -- 🎯 TARGET UTAMA: 3–4 PLAYER
-        if playing >= TARGET_MIN and playing <= TARGET_MAX then
-            foundServerId    = id
-            foundPlayerCount = playing
-            print("[ServerHop] ✅ TARGET FOUND:", id, "|", playing, "player")
-            break
-        end
-
-        -- ⚠️ FALLBACK: <3 PLAYER (AMBIL YANG TERBESAR)
-        if playing < TARGET_MIN and playing > fallbackPlayers then
-            fallbackPlayers = playing
-            fallbackId      = id
+            -- 🌟 FALLBACK: SIMPAN SERVER TERPADAT YANG BELUM FULL
+            -- (prioritas ≥2 player; kalau tidak ada, nanti boleh 1 player)
+            if playing > bestOverallPlayers then
+                bestOverallPlayers = playing
+                bestOverallId      = id
+            end
         end
     end
 
-    if foundServerId or not cursor then break end
+    if foundServerId or not cursor then
+        break
+    end
 end
 
--- PAKAI FALLBACK JIKA TARGET UTAMA TIDAK ADA
-if not foundServerId and fallbackId then
-    foundServerId    = fallbackId
-    foundPlayerCount = fallbackPlayers
-    print("[ServerHop] ⚠️ Fallback server dipakai:",
-          foundServerId, "|", foundPlayerCount, "player")
+-- Kalau tidak ada 3–4 player, pakai server dengan player terbanyak
+if not foundServerId and bestOverallId then
+    foundServerId    = bestOverallId
+    foundPlayerCount = bestOverallPlayers
+    if bestOverallPlayers >= 2 then
+        print("[ServerHop] ⚠️ Tidak ada 3–4 player, pakai server TERPADAT:",
+              foundServerId, "|", bestOverallPlayers, "player")
+    else
+        print("[ServerHop] ⚠️ Semua server sepi (1 player), pakai salah satu:",
+              foundServerId)
+    end
 end
 
 ----------------------------------------------------------------------
 -- 🚀 TELEPORT
 ----------------------------------------------------------------------
 if foundServerId then
-    print("[ServerHop] Teleporting ke:", foundServerId)
+    print("[ServerHop] Teleporting ke:", foundServerId, "| players:", foundPlayerCount or "?")
 
     local ok, err = pcall(function()
         TeleportService:TeleportToPlaceInstance(placeId, foundServerId)
@@ -166,7 +173,8 @@ if foundServerId then
         end
     end
 else
-    warn("[ServerHop] ❌ Tidak ada server yang bisa dipakai.")
-    -- uncomment kalau mau rejoin paksa
+    warn("[ServerHop] ❌ Sama sekali tidak menemukan server yang bisa dipakai.")
+    warn("[ServerHop] Kamu bisa rejoin manual atau pakai Teleport(placeId).")
+    -- Kalau mau auto rejoin:
     -- TeleportService:Teleport(placeId)
 end
