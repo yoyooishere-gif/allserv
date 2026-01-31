@@ -4,7 +4,7 @@ if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
-task.wait(8) -- tunggu sebentar setelah join
+task.wait(12) -- tunggu sebentar setelah join
 
 ----------------------------------------------------------------------
 -- SERVICES
@@ -21,7 +21,7 @@ print("[HopNoDup] Start. JobId sekarang:", currentJobId)
 -- 🔧 KONFIGURASI VISITED
 ----------------------------------------------------------------------
 local VISITED_FILE       = "server-hop-visited.json"
-local VISITED_TTL_SECONDS = 1800  -- 30 menit
+local VISITED_TTL_SECONDS = 7200-- 2 jam
 
 ----------------------------------------------------------------------
 -- 🧠 LOAD / SAVE VISITED
