@@ -1,23 +1,13 @@
---==[ NO-API SERVER HOPPER – ANTI SERVER SAMA (30 MENIT) ]==--
+--==[ SIMPLE NON-DUPLICATE SERVER HOPPER ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
-----------------------------------------------------------------------
--- 🔧 KONFIGURASI
-----------------------------------------------------------------------
-local CONFIG = {
-    DelayBeforeCheck   = 8,     -- tunggu beberapa detik setelah join
-    VisitedFile        = "server-hop-visited.json",
-    VisitedTTLSeconds  = 1800,  -- 30 menit
-    RejoinDelay        = 5,     -- tunggu sebentar sebelum rejoin
-}
-
-task.wait(CONFIG.DelayBeforeCheck)
+task.wait(8) -- tunggu sebentar setelah join
 
 ----------------------------------------------------------------------
--- SERVICES & INFO
+-- SERVICES
 ----------------------------------------------------------------------
 local TeleportService = game:GetService("TeleportService")
 local HttpService     = game:GetService("HttpService")
@@ -25,69 +15,67 @@ local HttpService     = game:GetService("HttpService")
 local placeId      = game.PlaceId
 local currentJobId = game.JobId
 
-print("[NoApiHop] Start. JobId sekarang:", currentJobId)
+print("[HopNoDup] Start. JobId sekarang:", currentJobId)
 
 ----------------------------------------------------------------------
--- 🧠 SISTEM VISITED (ANTI BALIK SERVER YANG SAMA)
+-- 🔧 KONFIGURASI VISITED
 ----------------------------------------------------------------------
-local visited = {}  -- [jobId] = lastTime
+local VISITED_FILE       = "server-hop-visited.json"
+local VISITED_TTL_SECONDS = 1800  -- 30 menit
+
+----------------------------------------------------------------------
+-- 🧠 LOAD / SAVE VISITED
+----------------------------------------------------------------------
+local visited = {}  -- [jobId] = timestamp
 
 local function loadVisited()
-    if not readfile then
-        warn("[NoApiHop] Executor tidak punya readfile, visited tidak aktif.")
-        return
-    end
+    if not readfile then return end
 
     local ok, content = pcall(function()
-        return readfile(CONFIG.VisitedFile)
+        return readfile(VISITED_FILE)
     end)
-
-    if not ok or not content or content == "" then
-        return
-    end
+    if not ok or not content or content == "" then return end
 
     local okDecode, data = pcall(function()
         return HttpService:JSONDecode(content)
     end)
-
     if okDecode and type(data) == "table" then
         visited = data
-    else
-        warn("[NoApiHop] File visited corrupt, reset baru.")
-        visited = {}
     end
 end
 
 local function saveVisited()
     if not writefile then return end
-
     local ok, encoded = pcall(function()
         return HttpService:JSONEncode(visited)
     end)
-
     if ok then
         pcall(function()
-            writefile(CONFIG.VisitedFile, encoded)
+            writefile(VISITED_FILE, encoded)
         end)
     end
 end
 
 local function cleanupVisited()
     local now = os.time()
-    local ttl = CONFIG.VisitedTTLSeconds
     local removed = 0
-
     for jobId, ts in pairs(visited) do
-        if type(ts) ~= "number" or now - ts > ttl then
+        if type(ts) ~= "number" or now - ts > VISITED_TTL_SECONDS then
             visited[jobId] = nil
             removed += 1
         end
     end
-
     if removed > 0 then
-        print("[NoApiHop] Hapus", removed, "server lama dari visited.")
+        print("[HopNoDup] Hapus", removed, "server lama dari visited.")
         saveVisited()
     end
+end
+
+local function isRecentlyVisited(jobId)
+    if not jobId then return false end
+    local ts = visited[jobId]
+    if not ts then return false end
+    return (os.time() - ts) <= VISITED_TTL_SECONDS
 end
 
 local function markVisited(jobId)
@@ -96,37 +84,85 @@ local function markVisited(jobId)
     saveVisited()
 end
 
-local function isRecentlyVisited(jobId)
-    if not jobId then return false end
-    local ts = visited[jobId]
-    if not ts then return false end
-    local now = os.time()
-    return (now - ts) <= CONFIG.VisitedTTLSeconds
+loadVisited()
+cleanupVisited()
+markVisited(currentJobId)
+
+----------------------------------------------------------------------
+-- 🌐 AMBIL LIST SERVER SEKALI
+----------------------------------------------------------------------
+local function getServersOnce()
+    -- kecilin limit supaya ringan
+    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
+        :format(placeId)
+
+    local ok, res = pcall(function()
+        return game:HttpGet(url)
+    end)
+    if not ok then
+        warn("[HopNoDup] HttpGet gagal:", res)
+        return nil
+    end
+
+    local decoded
+    local okDecode, err = pcall(function()
+        decoded = HttpService:JSONDecode(res)
+    end)
+    if not okDecode then
+        warn("[HopNoDup] JSON decode gagal:", err)
+        return nil
+    end
+
+    return decoded.data
 end
 
 ----------------------------------------------------------------------
--- 🚀 LOGIKA UTAMA
+-- 🔎 PILIH SERVER YANG BEDA JOBID & BELUM VISITED
 ----------------------------------------------------------------------
-loadVisited()
-cleanupVisited()
+local servers = getServersOnce()
+if not servers then
+    warn("[HopNoDup] Tidak bisa ambil list server. (API error)")
+    return
+end
 
-if isRecentlyVisited(currentJobId) then
-    -- Server ini sudah dikunjungi dalam 30 menit terakhir → rejoin lagi
-    warn("[NoApiHop] Server ini sudah pernah dikunjungi (<=30 menit). Rejoin ke server lain...")
+local targetId
 
-    task.wait(CONFIG.RejoinDelay)
+for _, server in ipairs(servers) do
+    local id      = server.id
+    local playing = server.playing or 0
+    local maxP    = server.maxPlayers or 0
+
+    print(("[HopNoDup] Cek server %s | %d/%d pemain")
+        :format(tostring(id), playing, maxP))
+
+    if not id then
+        continue
+    end
+
+    -- syarat: beda JobId, tidak penuh, belum visited 30 menit
+    if id ~= currentJobId
+        and playing < maxP
+        and not isRecentlyVisited(id)
+    then
+        targetId = id
+        break
+    end
+end
+
+----------------------------------------------------------------------
+-- 🚀 TELEPORT
+----------------------------------------------------------------------
+if targetId then
+    print("[HopNoDup] ✅ Teleport ke server baru:", targetId)
+    markVisited(targetId)
 
     local ok, err = pcall(function()
-        TeleportService:Teleport(placeId)
+        TeleportService:TeleportToPlaceInstance(placeId, targetId)
     end)
 
     if not ok then
-        warn("[NoApiHop] Teleport(placeId) gagal:", err)
-    else
-        print("[NoApiHop] Teleport rejoin dikirim. Roblox akan pilih server lain.")
+        warn("[HopNoDup] Teleport gagal:", err)
     end
 else
-    -- Server baru (belum di-visited atau sudah lewat >30 menit)
-    print("[NoApiHop] ✅ Server ini BELUM ada di visited 30 menit terakhir. Stay di sini.")
-    markVisited(currentJobId)
+    warn("[HopNoDup] ❌ Tidak ada server lain yang cocok (semua penuh / sudah dikunjungi).")
 end
