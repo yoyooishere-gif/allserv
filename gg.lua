@@ -1,168 +1,68 @@
---==[ SIMPLE NON-DUPLICATE SERVER HOPPER ]==--
+--==[ REJOIN SAMPAI SERVER RAME (MIN PLAYER) ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
-task.wait(12) -- tunggu sebentar setelah join
+----------------------------------------------------------------------
+-- 🔧 KONFIGURASI
+----------------------------------------------------------------------
+local CONFIG = {
+    DelayBeforeCheck   = 15,   -- tunggu world load dulu sebelum cek (detik)
+    MinPlayersDesired  = 3,   -- minimal player yang kamu mau (ubah misal 4)
+    MaxRejoinAttempts  = 8,   -- maksimal berapa kali coba rejoin
+    RejoinDelay        = 6,   -- jeda sebelum kirim Teleport lagi (detik)
+}
 
 ----------------------------------------------------------------------
 -- SERVICES
 ----------------------------------------------------------------------
+local Players         = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
-local HttpService     = game:GetService("HttpService")
+local placeId         = game.PlaceId
 
-local placeId      = game.PlaceId
-local currentJobId = game.JobId
-
-print("[HopNoDup] Start. JobId sekarang:", currentJobId)
+task.wait(CONFIG.DelayBeforeCheck)
 
 ----------------------------------------------------------------------
--- 🔧 KONFIGURASI VISITED
+-- FUNGSI AMBIL JUMLAH PLAYER
 ----------------------------------------------------------------------
-local VISITED_FILE       = "server-hop-visited.json"
-local VISITED_TTL_SECONDS = 7200-- 2 jam
-
-----------------------------------------------------------------------
--- 🧠 LOAD / SAVE VISITED
-----------------------------------------------------------------------
-local visited = {}  -- [jobId] = timestamp
-
-local function loadVisited()
-    if not readfile then return end
-
-    local ok, content = pcall(function()
-        return readfile(VISITED_FILE)
-    end)
-    if not ok or not content or content == "" then return end
-
-    local okDecode, data = pcall(function()
-        return HttpService:JSONDecode(content)
-    end)
-    if okDecode and type(data) == "table" then
-        visited = data
-    end
-end
-
-local function saveVisited()
-    if not writefile then return end
-    local ok, encoded = pcall(function()
-        return HttpService:JSONEncode(visited)
-    end)
-    if ok then
-        pcall(function()
-            writefile(VISITED_FILE, encoded)
-        end)
-    end
-end
-
-local function cleanupVisited()
-    local now = os.time()
-    local removed = 0
-    for jobId, ts in pairs(visited) do
-        if type(ts) ~= "number" or now - ts > VISITED_TTL_SECONDS then
-            visited[jobId] = nil
-            removed += 1
-        end
-    end
-    if removed > 0 then
-        print("[HopNoDup] Hapus", removed, "server lama dari visited.")
-        saveVisited()
-    end
-end
-
-local function isRecentlyVisited(jobId)
-    if not jobId then return false end
-    local ts = visited[jobId]
-    if not ts then return false end
-    return (os.time() - ts) <= VISITED_TTL_SECONDS
-end
-
-local function markVisited(jobId)
-    if not jobId then return end
-    visited[jobId] = os.time()
-    saveVisited()
-end
-
-loadVisited()
-cleanupVisited()
-markVisited(currentJobId)
-
-----------------------------------------------------------------------
--- 🌐 AMBIL LIST SERVER SEKALI
-----------------------------------------------------------------------
-local function getServersOnce()
-    -- kecilin limit supaya ringan
-    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
-        :format(placeId)
-
-    local ok, res = pcall(function()
-        return game:HttpGet(url)
-    end)
-    if not ok then
-        warn("[HopNoDup] HttpGet gagal:", res)
-        return nil
-    end
-
-    local decoded
-    local okDecode, err = pcall(function()
-        decoded = HttpService:JSONDecode(res)
-    end)
-    if not okDecode then
-        warn("[HopNoDup] JSON decode gagal:", err)
-        return nil
-    end
-
-    return decoded.data
+local function getPlayerCount()
+    -- #Players:GetPlayers() biasanya lebih akurat daripada server.playing di API
+    return #Players:GetPlayers()
 end
 
 ----------------------------------------------------------------------
--- 🔎 PILIH SERVER YANG BEDA JOBID & BELUM VISITED
+-- LOOP REJOIN
 ----------------------------------------------------------------------
-local servers = getServersOnce()
-if not servers then
-    warn("[HopNoDup] Tidak bisa ambil list server. (API error)")
-    return
-end
+local attempt = 0
 
-local targetId
+while attempt < CONFIG.MaxRejoinAttempts do
+    local count = getPlayerCount()
+    print(("[RejoinMin] Server saat ini: %d pemain"):format(count))
 
-for _, server in ipairs(servers) do
-    local id      = server.id
-    local playing = server.playing or 0
-    local maxP    = server.maxPlayers or 0
-
-    print(("[HopNoDup] Cek server %s | %d/%d pemain")
-        :format(tostring(id), playing, maxP))
-
-    if not id then
-        continue
-    end
-
-    -- syarat: beda JobId, tidak penuh, belum visited 30 menit
-    if id ~= currentJobId
-        and playing < maxP
-        and not isRecentlyVisited(id)
-    then
-        targetId = id
+    if count >= CONFIG.MinPlayersDesired then
+        print(("[RejoinMin] ✅ Cukup rame (>= %d player). Stop rejoin."):format(CONFIG.MinPlayersDesired))
         break
     end
-end
 
-----------------------------------------------------------------------
--- 🚀 TELEPORT
-----------------------------------------------------------------------
-if targetId then
-    print("[HopNoDup] ✅ Teleport ke server baru:", targetId)
-    markVisited(targetId)
+    attempt += 1
+    warn(("[RejoinMin] Server sepi (%d/<%d). Rejoin attempt %d ...")
+        :format(count, CONFIG.MinPlayersDesired, attempt))
+
+    task.wait(CONFIG.RejoinDelay)
 
     local ok, err = pcall(function()
-        TeleportService:TeleportToPlaceInstance(placeId, targetId)
+        TeleportService:Teleport(placeId)
     end)
 
     if not ok then
-        warn("[HopNoDup] Teleport gagal:", err)
+        warn("[RejoinMin] Teleport gagal:", err)
+        break
     end
-else
-    warn("[HopNoDup] ❌ Tidak ada server lain yang cocok (semua penuh / sudah dikunjungi).")
+
+    -- Catatan penting:
+    -- Mayoritas executor auto-execute script ulang setelah Teleport,
+    -- jadi loop ini biasanya TIDAK lanjut, tapi akan mulai dari awal
+    -- di server baru. Itu normal dan justru yang kita mau.
+    break
 end
